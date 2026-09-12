@@ -30,19 +30,50 @@ jobs:
           fi
           echo "Successfully loaded KNULLI RG28XX kernel configuration."
 
-      - name: Apply RNDIS CDC Quirk Patch
+      - name: Apply RNDIS CDC Quirk via Python Replacer
         run: |
-          # Make patch script executable
-          chmod +x apply-rg28xx-rndis-cdc-patch.sh
-          
-          # Copy script and patch into kernel_source directory so patch file is locally available
-          cp apply-rg28xx-rndis-cdc-patch.sh kernel_source/
-          cp 0001-rg28xx-backport-android-rndis-cdc-quirk.patch kernel_source/
-          
-          # Execute patch script from within kernel_source
-          cd kernel_source
-          ./apply-rg28xx-rndis-cdc-patch.sh .
-          cd ..
+          python3 -c '
+          from pathlib import Path
+          import sys
+
+          file_path = Path("kernel_source/drivers/net/usb/cdc_ether.c")
+          s = file_path.read_text()
+
+          if "android_rndis_quirk" in s:
+              print("cdc_ether.c is already patched.")
+              sys.exit(0)
+
+          # 1. Add android_rndis_quirk declaration
+          old_decl = "int\t\t\t\trndis;\n\tstruct usb_driver\t\t*driver = driver_of(intf);"
+          new_decl = "int\t\t\t\trndis;\n\tbool\t\t\t\tandroid_rndis_quirk = false;\n\tstruct usb_driver\t\t*driver = driver_of(intf);"
+
+          if old_decl not in s:
+              print("ERROR: Variable declaration block not found!")
+              sys.exit(1)
+          s = s.replace(old_decl, new_decl, 1)
+
+          # 2. Patch bind function for Unisoc/Android RNDIS fallback
+          old_bind = "\tinfo->control = usb_ifnum_to_if(dev->udev,\n\t\t\tinfo->u->bMasterInterface0);\n\tinfo->data = usb_ifnum_to_if(dev->udev,\n\t\t\tinfo->u->bSlaveInterface0);\n\tif (!info->control || !info->data) {\n\t\tdev_dbg(&intf->dev,\n\t\t\t\"master #%u/%p slave #%u/%p\\n\",\n\t\t\tinfo->u->bMasterInterface0,\n\t\t\tinfo->control,\n\t\t\tinfo->u->bSlaveInterface0,\n\t\t\tinfo->data);\n\t\tgoto bad_desc;\n\t}"
+
+          new_bind = "\tinfo->control = usb_ifnum_to_if(dev->udev,\n\t\t\tinfo->u->bMasterInterface0);\n\tinfo->data = usb_ifnum_to_if(dev->udev,\n\t\t\tinfo->u->bSlaveInterface0);\n\tif (!info->control || !info->data) {\n\t\tdev_dbg(&intf->dev,\n\t\t\t\"master #%u/%p slave #%u/%p\\n\",\n\t\t\tinfo->u->bMasterInterface0,\n\t\t\tinfo->control,\n\t\t\tinfo->u->bSlaveInterface0,\n\t\t\tinfo->data);\n\t\tif (rndis) {\n\t\t\tandroid_rndis_quirk = true;\n\t\t\tgoto skip;\n\t\t}\n\t\tgoto bad_desc;\n\t}"
+
+          if old_bind not in s:
+              print("ERROR: Bind interface block not found!")
+              sys.exit(1)
+          s = s.replace(old_bind, new_bind, 1)
+
+          # 3. Add Android RNDIS Interface 0/1 fallback logic in skip section
+          old_skip = "skip:\n\tif (!info->header || (!rndis && !info->ether)) {"
+          new_skip = "skip:\n\tif (rndis && is_rndis(&intf->cur_altsetting->desc) &&\n\t    header.usb_cdc_acm_descriptor &&\n\t    header.usb_cdc_acm_descriptor->bmCapabilities) {\n\t\tdev_dbg(&intf->dev,\n\t\t\t\"ACM capabilities %02x, not really RNDIS?\\n\",\n\t\t\theader.usb_cdc_acm_descriptor->bmCapabilities);\n\t\tgoto bad_desc;\n\t}\n\n\tif (rndis && (!info->u || android_rndis_quirk)) {\n\t\tinfo->control = usb_ifnum_to_if(dev->udev, 0);\n\t\tinfo->data = usb_ifnum_to_if(dev->udev, 1);\n\t\tif (!info->control || !info->data || info->control != intf) {\n\t\t\tdev_err(&intf->dev,\n\t\t\t\t\"rndis: master #0/%p slave #1/%p\\n\",\n\t\t\t\tinfo->control, info->data);\n\t\t\tgoto bad_desc;\n\t\t}\n\t}\n\n\tif (!info->header || (!rndis && !info->ether)) {"
+
+          if old_skip not in s:
+              print("ERROR: Skip block not found!")
+              sys.exit(1)
+          s = s.replace(old_skip, new_skip, 1)
+
+          file_path.write_text(s)
+          print("Successfully patched kernel source: drivers/net/usb/cdc_ether.c")
+          '
 
       - name: Configure KNULLI Kernel Tree
         run: |
