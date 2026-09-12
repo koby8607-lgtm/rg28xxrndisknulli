@@ -32,22 +32,17 @@ jobs:
 
       - name: Apply RNDIS CDC Quirk Patch
         run: |
-          chmod +x apply-rg28xx-rndis-cdc-patch.sh || true
+          # Make patch script executable
+          chmod +x apply-rg28xx-rndis-cdc-patch.sh
           
-          if [ -f "apply-rg28xx-rndis-cdc-patch.sh" ]; then
-            cp apply-rg28xx-rndis-cdc-patch.sh kernel_source/
-            cp 0001-rg28xx-backport-android-rndis-cdc-quirk.patch kernel_source/ 2>/dev/null || true
-            cd kernel_source
-            ./apply-rg28xx-rndis-cdc-patch.sh .
-            cd ..
-          elif [ -f "0001-rg28xx-backport-android-rndis-cdc-quirk.patch" ]; then
-            cd kernel_source
-            patch -p1 < ../0001-rg28xx-backport-android-rndis-cdc-quirk.patch
-            cd ..
-          else
-            echo "ERROR: Patch files not found!"
-            exit 1
-          fi
+          # Copy script and patch into kernel_source directory so patch file is locally available
+          cp apply-rg28xx-rndis-cdc-patch.sh kernel_source/
+          cp 0001-rg28xx-backport-android-rndis-cdc-quirk.patch kernel_source/
+          
+          # Execute patch script from within kernel_source
+          cd kernel_source
+          ./apply-rg28xx-rndis-cdc-patch.sh .
+          cd ..
 
       - name: Configure KNULLI Kernel Tree
         run: |
@@ -93,7 +88,7 @@ jobs:
           KERNEL_BIN="kernel_source/arch/arm64/boot/Image"
           DTB_BIN=$(find kernel_source/arch/arm64/boot/dts/ -name "*h700*.dtb" -o -name "*sun50i*.dtb" | head -n 1)
 
-          # Save individual Kernel Image for simple file replacement
+          # Copy loose Image file for easy boot replacement
           cp "$KERNEL_BIN" output/Image
 
           # Package kernel and DTB into standard Android boot format
