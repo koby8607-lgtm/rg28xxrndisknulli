@@ -1,0 +1,117 @@
+name: Build Patched KNULLI RG28XX boot.img
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Patch Repository
+        uses: actions/checkout@v4
+
+      - name: Install Toolchain & Boot Image Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git python3 mkbootimg u-boot-tools
+
+      - name: Fetch Official knulli-linux Repository
+        run: |
+          # Fetch official KNULLI Linux kernel tree
+          git clone --depth 1 -b master https://github.com/knulli-cfw/knulli-linux.git knulli_repo
+          
+          # If knulli-linux is a buildroot workspace, target its internal Linux source tree, 
+          # otherwise fallback to the H700 Linux kernel tree targeted by KNULLI
+          if [ -d "knulli_repo/board/batocera/allwinner/h700/linux" ]; then
+            echo "Found KNULLI buildroot H700 board files."
+          fi
+          
+          git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
+
+      - name: Apply RNDIS CDC Quirk Patch
+        run: |
+          chmod +x apply-rg28xx-rndis-cdc-patch.sh || true
+          
+          if [ -f "apply-rg28xx-rndis-cdc-patch.sh" ]; then
+            ./apply-rg28xx-rndis-cdc-patch.sh kernel_source/
+          elif [ -f "0001-rg28xx-backport-android-rndis-cdc-quirk.patch" ]; then
+            cd kernel_source
+            patch -p1 < ../0001-rg28xx-backport-android-rndis-cdc-quirk.patch
+            cd ..
+          else
+            echo "ERROR: Patch script or file not found in repository root!"
+            exit 1
+          fi
+
+      - name: Configure KNULLI Kernel Tree
+        run: |
+          cd kernel_source
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          # Apply Sun50i H700 board config
+          if [ -f "arch/arm64/configs/sun50iw9p1_defconfig" ]; then
+            cp arch/arm64/configs/sun50iw9p1_defconfig .config
+          else
+            CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
+            cp "$CONFIG_PATH" .config
+          fi
+
+          echo "" > .scmversion
+          scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
+          scripts/config --file .config --disable CONFIG_LOCALVERSION_AUTO
+
+          # Built-in USB RNDIS/CDC networking drivers directly in Image
+          scripts/config --file .config --enable CONFIG_NETDEVICES
+          scripts/config --file .config --enable CONFIG_USB_NET_DRIVERS
+          scripts/config --file .config --enable CONFIG_USB_USBNET
+          scripts/config --file .config --enable CONFIG_USB_NET_CDCETHER
+          scripts/config --file .config --enable CONFIG_USB_NET_RNDIS_HOST
+          scripts/config --file .config --enable CONFIG_MII
+
+          make ARCH=arm64 olddefconfig
+
+          # Prepare toolchain headers
+          make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" prepare -j1
+          make ARCH=arm64 HOSTCFLAGS="-w" KCFLAGS="-w" scripts -j1
+
+      - name: Compile KNULLI Kernel Image & Device Tree
+        run: |
+          cd kernel_source
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          make ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            HOSTCFLAGS="-w" \
+            KCFLAGS="-w" \
+            LOCALVERSION="" \
+            Image dtbs -j$(nproc)
+
+      - name: Build KNULLI boot.img
+        run: |
+          mkdir output
+          
+          KERNEL_BIN="kernel_source/arch/arm64/boot/Image"
+          DTB_BIN=$(find kernel_source/arch/arm64/boot/dts/ -name "*h700*.dtb" -o -name "*sun50i*.dtb" | head -n 1)
+
+          # Package kernel and DTB into standard Android boot format
+          mkbootimg \
+            --kernel "$KERNEL_BIN" \
+            --ramdisk /dev/null \
+            --second "$DTB_BIN" \
+            --base 0x10000000 \
+            --kernel_offset 0x00080000 \
+            --ramdisk_offset 0x01000000 \
+            --tags_offset 0x00000100 \
+            --pagesize 2048 \
+            --output output/boot.img
+
+          ls -lh output/boot.img
+
+      - name: Upload KNULLI boot.img Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: knulli-rg28xx-boot-img
+          path: output/boot.img
