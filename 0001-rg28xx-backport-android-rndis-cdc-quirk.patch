@@ -1,0 +1,83 @@
+From 7d0d7c4c-rg28xx-rndis Mon Sep 17 00:00:00 2001
+Subject: [PATCH] usb: cdc_ether: backport Android RNDIS bad CDC union quirk
+
+Backport the Android RNDIS handling used by newer Linux kernels.
+
+Some Android RNDIS devices advertise a CDC Union descriptor whose
+interface numbers do not exist. Older cdc_ether rejects those devices
+with "bad CDC descriptors". For RNDIS, fall back to interfaces 0 and 1.
+
+Also restrict the ACM bmCapabilities rejection to genuine USB
+Communication-class RNDIS functions, matching the later upstream fix.
+
+This is intended for the KNULLI/Allwinner 4.9.170 H700 kernel.
+
+---
+ drivers/net/usb/cdc_ether.c | 31 ++++++++++++++++++++++++++++++-
+ 1 file changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/usb/cdc_ether.c b/drivers/net/usb/cdc_ether.c
+--- a/drivers/net/usb/cdc_ether.c
++++ b/drivers/net/usb/cdc_ether.c
+@@ -116,6 +116,7 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
+ 	struct cdc_state *info = (void *) &dev->data;
+ 	int status = -ENODEV;
+ 	int rndis;
++	bool android_rndis_quirk = false;
+ 	struct usb_driver *driver = driver_of(intf);
+ 	struct usb_cdc_parsed_header header;
+
+@@ -167,8 +168,14 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
+ 			info->u->bSlaveInterface0,
+ 			info->data);
++		/* fall back to hard-wiring for RNDIS */
++		if (rndis) {
++			android_rndis_quirk = true;
++			goto skip;
++		}
+ 		goto bad_desc;
+ 	}
+ 	if (info->control != intf) {
+@@ -194,7 +201,7 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
+ 	skip:
+-	if (rndis &&
++	if (rndis && is_rndis(&intf->cur_altsetting->desc) &&
+ 		header.usb_cdc_acm_descriptor &&
+ 		header.usb_cdc_acm_descriptor->bmCapabilities) {
+ 		dev_dbg(&intf->dev,
+@@ -218,6 +225,28 @@ int usbnet_generic_cdc_bind(struct usbnet *dev, struct usb_interface *intf)
+ 		goto bad_desc;
+ 	}
+
++	/*
++	 * Microsoft ActiveSync based and some regular RNDIS devices lack the
++	 * CDC descriptors, so we'll hard-wire the interfaces and not check
++	 * for descriptors.
++	 *
++	 * Some Android RNDIS devices have a CDC Union descriptor pointing
++	 * to non-existing interfaces. Ignore that and attempt the same
++	 * hard-wired 0 and 1 interfaces.
++	 */
++	if (rndis && (!info->u || android_rndis_quirk)) {
++		info->control = usb_ifnum_to_if(dev->udev, 0);
++		info->data = usb_ifnum_to_if(dev->udev, 1);
++		if (!info->control || !info->data || info->control != intf) {
++			dev_dbg(&intf->dev,
++				"rndis: master #0/%p slave #1/%p\n",
++				info->control,
++				info->data);
++			goto bad_desc;
++		}
++	} else if (!info->header || (!rndis && !info->ether)) {
++		dev_dbg(&intf->dev, "missing cdc %s%s%sdescriptor\n",
++			info->header ? "" : "header ",
++			info->u ? "" : "union ",
++			info->ether ? "" : "ether ");
++		goto bad_desc;
++	}
++
+ 	/* claim data interface and set it up ... with side effects.
+ 	 * network traffic can't flow until an altsetting is enabled.
+ 	 */
+-- 
+2.39.5
