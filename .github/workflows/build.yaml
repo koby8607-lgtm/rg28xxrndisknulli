@@ -18,12 +18,10 @@ jobs:
 
       - name: Fetch KNULLI H700 Kernel Source
         run: |
-          # Fetch exact kernel repository and branch declared in KNULLI RG28XX board file
           git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
 
       - name: Fetch Official KNULLI H700 Linux Defconfig (knulli-main Branch)
         run: |
-          # Download linux-sunxi64-legacy.config directly from knulli-main branch
           curl -sSL "https://raw.githubusercontent.com/knulli-cfw/knulli-linux/knulli-main/board/allwinner/h700/linux-sunxi64-legacy.config" -o kernel_source/.config
           
           if [ ! -s "kernel_source/.config" ]; then
@@ -37,13 +35,17 @@ jobs:
           chmod +x apply-rg28xx-rndis-cdc-patch.sh || true
           
           if [ -f "apply-rg28xx-rndis-cdc-patch.sh" ]; then
-            ./apply-rg28xx-rndis-cdc-patch.sh kernel_source/
+            cp apply-rg28xx-rndis-cdc-patch.sh kernel_source/
+            cp 0001-rg28xx-backport-android-rndis-cdc-quirk.patch kernel_source/ 2>/dev/null || true
+            cd kernel_source
+            ./apply-rg28xx-rndis-cdc-patch.sh .
+            cd ..
           elif [ -f "0001-rg28xx-backport-android-rndis-cdc-quirk.patch" ]; then
             cd kernel_source
             patch -p1 < ../0001-rg28xx-backport-android-rndis-cdc-quirk.patch
             cd ..
           else
-            echo "ERROR: Patch script or file not found in repository root!"
+            echo "ERROR: Patch files not found!"
             exit 1
           fi
 
@@ -84,12 +86,15 @@ jobs:
             LOCALVERSION="" \
             Image dtbs -j$(nproc)
 
-      - name: Build RG28XX boot.img
+      - name: Build RG28XX boot.img & Package Artifacts
         run: |
           mkdir output
           
           KERNEL_BIN="kernel_source/arch/arm64/boot/Image"
           DTB_BIN=$(find kernel_source/arch/arm64/boot/dts/ -name "*h700*.dtb" -o -name "*sun50i*.dtb" | head -n 1)
+
+          # Save individual Kernel Image for simple file replacement
+          cp "$KERNEL_BIN" output/Image
 
           # Package kernel and DTB into standard Android boot format
           mkbootimg \
@@ -103,10 +108,10 @@ jobs:
             --pagesize 2048 \
             --output output/boot.img
 
-          ls -lh output/boot.img
+          ls -lh output/
 
-      - name: Upload KNULLI boot.img Artifact
+      - name: Upload KNULLI Boot Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: knulli-rg28xx-boot-img
-          path: output/boot.img
+          name: knulli-rg28xx-patched-kernel
+          path: output/
