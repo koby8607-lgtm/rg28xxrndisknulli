@@ -14,20 +14,23 @@ jobs:
       - name: Install Toolchain & Boot Image Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git python3 mkbootimg u-boot-tools
+          sudo apt-get install -y gcc gcc-aarch64-linux-gnu make bc bison flex libssl-dev libncurses-dev git python3 mkbootimg u-boot-tools curl
 
-      - name: Fetch Official knulli-linux Repository
+      - name: Fetch KNULLI H700 Kernel Source
         run: |
-          # Fetch official KNULLI Linux kernel tree
-          git clone --depth 1 -b master https://github.com/knulli-cfw/knulli-linux.git knulli_repo
-          
-          # If knulli-linux is a buildroot workspace, target its internal Linux source tree, 
-          # otherwise fallback to the H700 Linux kernel tree targeted by KNULLI
-          if [ -d "knulli_repo/board/batocera/allwinner/h700/linux" ]; then
-            echo "Found KNULLI buildroot H700 board files."
-          fi
-          
+          # Fetch exact kernel repository and branch declared in KNULLI RG28XX board file
           git clone --depth 1 -b orange-pi-4.9-sun50iw9 https://github.com/orangepi-xunlong/linux-orangepi.git kernel_source
+
+      - name: Fetch Official KNULLI H700 Linux Defconfig (knulli-main Branch)
+        run: |
+          # Download linux-sunxi64-legacy.config directly from knulli-main branch
+          curl -sSL "https://raw.githubusercontent.com/knulli-cfw/knulli-linux/knulli-main/board/allwinner/h700/linux-sunxi64-legacy.config" -o kernel_source/.config
+          
+          if [ ! -s "kernel_source/.config" ]; then
+            echo "ERROR: Failed to download linux-sunxi64-legacy.config from knulli-main!"
+            exit 1
+          fi
+          echo "Successfully loaded KNULLI RG28XX kernel configuration."
 
       - name: Apply RNDIS CDC Quirk Patch
         run: |
@@ -49,14 +52,6 @@ jobs:
           cd kernel_source
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-
-          # Apply Sun50i H700 board config
-          if [ -f "arch/arm64/configs/sun50iw9p1_defconfig" ]; then
-            cp arch/arm64/configs/sun50iw9p1_defconfig .config
-          else
-            CONFIG_PATH=$(find arch/ -name "*sun50i*" -o -name "*defconfig*" | head -n 1)
-            cp "$CONFIG_PATH" .config
-          fi
 
           echo "" > .scmversion
           scripts/config --file .config --set-str CONFIG_LOCALVERSION ""
@@ -89,7 +84,7 @@ jobs:
             LOCALVERSION="" \
             Image dtbs -j$(nproc)
 
-      - name: Build KNULLI boot.img
+      - name: Build RG28XX boot.img
         run: |
           mkdir output
           
