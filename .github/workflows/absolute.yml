@@ -117,7 +117,9 @@ jobs:
             configs/knulli-h700-rg28xx-rndis.board
 
           echo "Checking that KNULLI recognises the custom target..."
-          make vars | grep -q 'h700-rg28xx-rndis'
+          make vars > /tmp/knulli-vars.txt
+          cat /tmp/knulli-vars.txt
+          grep -q 'h700-rg28xx-rndis' /tmp/knulli-vars.txt
           echo "Target is recognised by KNULLI Makefile."
 
       - name: Enable built-in RNDIS kernel support
@@ -218,10 +220,18 @@ jobs:
           find output/h700-rg28xx-rndis/images -type f \
             \( -name '*.img.gz' -o -name '*.img' \) -print
 
-          image="$(find output/h700-rg28xx-rndis/images -type f -name '*.img.gz' | head -n 1)"
+          image=""
+          while IFS= read -r candidate; do
+            image="$candidate"
+            break
+          done < <(find output/h700-rg28xx-rndis/images -type f -name '*.img.gz')
           test -n "$image"
 
-          kernel_config="$(find output/h700-rg28xx-rndis/build -maxdepth 2 -type f -path '*/linux-*/.config' | head -n 1)"
+          kernel_config=""
+          while IFS= read -r candidate; do
+            kernel_config="$candidate"
+            break
+          done < <(find output/h700-rg28xx-rndis/build -maxdepth 2 -type f -path '*/linux-*/.config')
           test -n "$kernel_config"
 
           grep -q '^CONFIG_USB_USBNET=y$' "$kernel_config"
