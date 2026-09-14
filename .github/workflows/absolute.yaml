@@ -1,0 +1,160 @@
+name: Build KNULLI RG28XX RNDIS
+
+"on":
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout KNULLI
+        uses: actions/checkout@v4
+        with:
+          repository: knulli-cfw/distribution
+          ref: knulli-main
+          fetch-depth: 1
+
+      - name: Restore Buildroot download cache
+        id: dl-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: dl
+          key: knulli-rg28xx-buildroot-dl-v1-${{ runner.os }}
+
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ccache
+          key: knulli-rg28xx-ccache-v1-${{ runner.os }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex gettext git \
+            libncurses5-dev libncursesw5-dev libssl-dev libelf-dev ccache cmake \
+            device-tree-compiler dosfstools file gawk graphviz imagemagick \
+            libglib2.0-dev libtool m4 mtools pigz python3 rsync scons subversion \
+            texinfo u-boot-tools unzip wget xdelta3 zip curl xz-utils
+
+      - name: Prepare build caches
+        run: |
+          mkdir -p "${{ github.workspace }}/dl"
+          mkdir -p "${{ github.workspace }}/ccache"
+
+      - name: Pre-download fontconfig
+        run: |
+          set -e
+          file="${{ github.workspace }}/dl/fontconfig-2.15.0.tar.xz"
+          if [ ! -s "$file" ]; then
+            curl -fL --retry 10 --retry-delay 5 \
+              "https://dev-www.libreoffice.org/src/fontconfig-2.15.0.tar.xz" \
+              -o "$file"
+          fi
+          test -s "$file"
+          ls -lh "$file"
+
+      - name: Find RG28XX board
+        run: |
+          set -e
+          board="$(find configs -type f -name 'knulli-h700-rg28xx*.board' | sort | head -n 1)"
+          if [ -z "$board" ]; then
+            echo "ERROR: RG28XX board definition not found"
+            find configs -type f -name 'knulli-*.board' | sort | grep -Ei 'h700|rg28' || true
+            exit 1
+          fi
+          echo "Using board: $board"
+          cp "$board" configs/knulli-h700-rg28xx-rndis.board
+
+      - name: Enable RNDIS kernel options
+        run: |
+          set -e
+          config="board/allwinner/h700/linux-sunxi64-legacy.config"
+          test -f "$config"
+          sed -i \
+            -e '/^CONFIG_NETDEVICES=/d' \
+            -e '/^# CONFIG_NETDEVICES is not set$/d' \
+            -e '/^CONFIG_USB_NET_DRIVERS=/d' \
+            -e '/^# CONFIG_USB_NET_DRIVERS is not set$/d' \
+            -e '/^CONFIG_USB_USBNET=/d' \
+            -e '/^# CONFIG_USB_USBNET is not set$/d' \
+            -e '/^CONFIG_USB_NET_CDCETHER=/d' \
+            -e '/^# CONFIG_USB_NET_CDCETHER is not set$/d' \
+            -e '/^CONFIG_USB_NET_RNDIS_HOST=/d' \
+            -e '/^# CONFIG_USB_NET_RNDIS_HOST is not set$/d' \
+            -e '/^CONFIG_MII=/d' \
+            -e '/^# CONFIG_MII is not set$/d' \
+            "$config"
+          printf '%s\n' \
+            'CONFIG_NETDEVICES=y' \
+            'CONFIG_USB_NET_DRIVERS=y' \
+            'CONFIG_USB_USBNET=y' \
+            'CONFIG_USB_NET_CDCETHER=y' \
+            'CONFIG_USB_NET_RNDIS_HOST=y' \
+            'CONFIG_MII=y' >> "$config"
+          grep -E '^CONFIG_(NETDEVICES|USB_NET_DRIVERS|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST|MII)=' "$config"
+
+      - name: Verify BSP CDC workaround
+        run: |
+          set -e
+          url="https://raw.githubusercontent.com/orangepi-xunlong/linux-orangepi/orange-pi-4.9-sun50iw9/drivers/net/usb/cdc_ether.c"
+          curl -fsSL "$url" -o /tmp/cdc_ether.c
+          grep -q 'android_rndis_quirk' /tmp/cdc_ether.c
+          grep -q 'usb_ifnum_to_if(dev->udev, 0)' /tmp/cdc_ether.c
+          grep -q 'usb_ifnum_to_if(dev->udev, 1)' /tmp/cdc_ether.c
+          echo 'BSP CDC/RNDIS workaround confirmed.'
+
+      - name: Generate KNULLI defconfig
+        run: ./configs/createDefconfig.sh ./configs/knulli-h700-rg28xx-rndis
+
+      - name: Build full image
+        env:
+          BR2_DL_DIR: ${{ github.workspace }}/dl
+          BR2_CCACHE_DIR: ${{ github.workspace }}/ccache
+        run: |
+          set -e
+          mkdir -p "$BR2_DL_DIR" "$BR2_CCACHE_DIR"
+          make DIRECT_BUILD=1 \
+            BR2_DL_DIR="$BR2_DL_DIR" \
+            BR2_CCACHE_DIR="$BR2_CCACHE_DIR" \
+            h700-rg28xx-rndis-build
+
+      - name: Verify image
+        run: |
+          set -e
+          find output/h700-rg28xx-rndis -type f \
+            \( -name '*.img.gz' -o -name '*.img' \) -print
+          image="$(find output/h700-rg28xx-rndis -type f -name '*.img.gz' | head -n 1)"
+          test -n "$image"
+          ls -lh "$image"
+
+      - name: Verify RNDIS config in build output
+        run: |
+          grep -R 'CONFIG_USB_NET_RNDIS_HOST=y' \
+            output/h700-rg28xx-rndis/build/linux-* 2>/dev/null | head -20 || true
+
+      - name: Collect images
+        run: |
+          set -e
+          mkdir -p artifacts
+          find output/h700-rg28xx-rndis -type f \
+            \( -name '*.img.gz' -o -name '*.img' \) \
+            -exec cp -v {} artifacts/ \;
+          ls -lh artifacts
+
+      - name: Upload full KNULLI image
+        uses: actions/upload-artifact@v4
+        with:
+          name: knulli-rg28xx-rndis-full-image
+          path: artifacts/
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: knulli-rg28xx-rndis-build-logs
+          path: output/h700-rg28xx-rndis/build/
+          if-no-files-found: ignore
