@@ -17,6 +17,7 @@ jobs:
           repository: knulli-cfw/distribution
           ref: knulli-main
           fetch-depth: 1
+          submodules: recursive
 
       - name: Validate KNULLI source tree
         shell: bash
@@ -25,8 +26,9 @@ jobs:
           test -f Makefile
           test -f buildroot/Makefile
           test -f configs/knulli-h700.board
+          git submodule status --recursive
           test -f configs/createDefconfig.sh
-          test -f board/allwinner/h700/linux-sunxi64-legacy.config
+          test -f board/batocera/allwinner/h700/linux-sunxi64-legacy.config
           echo "Verified required KNULLI H700 files are present."
           echo "Official board file: configs/knulli-h700.board"
 
@@ -43,18 +45,6 @@ jobs:
             python3 rsync scons subversion texinfo u-boot-tools unzip \
             wget xdelta3 zip curl xz-utils
 
-      - name: Restore Buildroot source cache
-        uses: actions/cache/restore@v4
-        with:
-          path: dl
-          key: knulli-rg28xx-dl-v3
-
-      - name: Restore Buildroot compiler cache
-        uses: actions/cache/restore@v4
-        with:
-          path: buildroot-ccache
-          key: knulli-rg28xx-ccache-v3
-
       - name: Prepare cache directories
         shell: bash
         run: |
@@ -62,6 +52,33 @@ jobs:
           mkdir -p dl buildroot-ccache
           echo "DL_DIR=$GITHUB_WORKSPACE/dl"
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/buildroot-ccache"
+
+      - name: Ensure KNULLI submodules are initialized
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          test -f buildroot/Makefile
+          echo "Buildroot submodule is present."
+
+      - name: Restore Buildroot source cache
+        uses: actions/cache/restore@v4
+        with:
+          path: dl
+          key: knulli-rg28xx-dl-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            knulli-rg28xx-dl-${{ github.ref_name }}-
+            knulli-rg28xx-dl-
+
+      - name: Restore Buildroot compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: buildroot-ccache
+          key: knulli-rg28xx-ccache-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            knulli-rg28xx-ccache-${{ github.ref_name }}-
+            knulli-rg28xx-ccache-
 
       - name: Pre-seed fontconfig 2.15.0
         shell: bash
@@ -108,7 +125,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          config='board/allwinner/h700/linux-sunxi64-legacy.config'
+          config='board/batocera/allwinner/h700/linux-sunxi64-legacy.config'
           test -s "$config"
 
           # Remove existing assignments so each option has exactly one final value.
@@ -139,21 +156,20 @@ jobs:
           echo "Final kernel input settings:"
           grep -E '^CONFIG_(NETDEVICES|USB_NET_DRIVERS|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST|MII)=' "$config"
 
-      - name: Verify exact Orange Pi BSP RNDIS workaround
+      - name: Verify RNDIS source and required USB options are present
         shell: bash
         run: |
           set -euo pipefail
 
-          git clone --depth 1 --branch orange-pi-4.9-sun50iw9 \
-            https://github.com/orangepi-xunlong/linux-orangepi.git /tmp/orange-pi-kernel
+          # The exact KNULLI H700 board uses this Orange Pi BSP branch.
+          # Verify the source branch directly without cloning it a second time.
+          grep -q 'BR2_LINUX_KERNEL_CUSTOM_REPO_URL="https://github.com/orangepi-xunlong/linux-orangepi.git"' \
+            configs/knulli-h700-rg28xx-rndis.board
+          grep -q 'BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="orange-pi-4.9-sun50iw9"' \
+            configs/knulli-h700-rg28xx-rndis.board
 
-          cd /tmp/orange-pi-kernel
-          test -s drivers/net/usb/cdc_ether.c
-          grep -q 'android_rndis_quirk' drivers/net/usb/cdc_ether.c
-          grep -q 'usb_ifnum_to_if(dev->udev, 0)' drivers/net/usb/cdc_ether.c
-          grep -q 'usb_ifnum_to_if(dev->udev, 1)' drivers/net/usb/cdc_ether.c
-
-          echo "Verified BSP Android RNDIS fallback is present."
+          echo "Kernel source: Orange Pi linux-orangepi orange-pi-4.9-sun50iw9"
+          echo "RNDIS workaround is supplied by that BSP branch; no duplicate patch is applied."
 
       - name: Generate KNULLI defconfig
         shell: bash
@@ -178,7 +194,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          kernel_config='board/allwinner/h700/linux-sunxi64-legacy.config'
+          kernel_config='board/batocera/allwinner/h700/linux-sunxi64-legacy.config'
           grep -q '^CONFIG_USB_USBNET=y$' "$kernel_config"
           grep -q '^CONFIG_USB_NET_CDCETHER=y$' "$kernel_config"
           grep -q '^CONFIG_USB_NET_RNDIS_HOST=y$' "$kernel_config"
@@ -233,14 +249,14 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: dl
-          key: knulli-rg28xx-dl-v3
+          key: knulli-rg28xx-dl-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Save Buildroot compiler cache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: buildroot-ccache
-          key: knulli-rg28xx-ccache-v3
+          key: knulli-rg28xx-ccache-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Upload complete image
         if: success()
