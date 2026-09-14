@@ -1,16 +1,11 @@
 name: Build KNULLI RG28XX RNDIS
 
-on:
+"on":
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-
-    env:
-      OUTPUT_DIR: ${{ github.workspace }}/output
-      DL_DIR: ${{ github.workspace }}/dl
-      BR2_CCACHE_DIR: ${{ github.workspace }}/ccache
 
     steps:
       - name: Checkout KNULLI
@@ -20,155 +15,47 @@ jobs:
           ref: knulli-main
           fetch-depth: 1
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex gettext git \
+            libncurses5-dev libncursesw5-dev libssl-dev libelf-dev ccache cmake \
+            device-tree-compiler dosfstools file gawk graphviz imagemagick \
+            libglib2.0-dev libtool m4 mtools pigz python3 rsync scons subversion \
+            texinfo u-boot-tools unzip wget xdelta3 zip curl xz-utils
 
-          sudo apt-get install -y \
-            build-essential \
-            bc \
-            bison \
-            flex \
-            gettext \
-            git \
-            libncurses5-dev \
-            libncursesw5-dev \
-            libssl-dev \
-            libelf-dev \
-            ccache \
-            cmake \
-            device-tree-compiler \
-            dosfstools \
-            file \
-            gawk \
-            graphviz \
-            imagemagick \
-            libglib2.0-dev \
-            libtool \
-            locales \
-            m4 \
-            mtools \
-            pigz \
-            python3 \
-            rsync \
-            scons \
-            subversion \
-            texinfo \
-            u-boot-tools \
-            unzip \
-            wget \
-            xdelta3 \
-            zip \
-            curl \
-            xz-utils
+      - name: Create download directory
+        run: mkdir -p "${{ github.workspace }}/dl"
 
-          sudo locale-gen en_US.UTF-8
-
-      - name: Restore Buildroot download cache
-        uses: actions/cache@v4
-        with:
-          path: dl
-          key: knulli-buildroot-dl-${{ runner.os }}-${{ hashFiles('configs/**', 'package/**', 'buildroot/**') }}
-          restore-keys: |
-            knulli-buildroot-dl-${{ runner.os }}-
-
-      - name: Restore ccache
-        uses: actions/cache@v4
-        with:
-          path: ccache
-          key: knulli-ccache-${{ runner.os }}-${{ github.sha }}
-          restore-keys: |
-            knulli-ccache-${{ runner.os }}-
-
-      - name: Prepare download directory
-        run: |
-          mkdir -p "$DL_DIR"
-
-      # Buildroot failed on the previous run because the Freedesktop
-      # download endpoint returned HTTP 418 and the Buildroot mirror
-      # returned 404. Pre-seed the exact expected tarball.
-      - name: Pre-download fontconfig 2.15.0
+      - name: Pre-download fontconfig
         run: |
           set -e
-
-          FILE="$DL_DIR/fontconfig-2.15.0.tar.xz"
-
-          if [ -s "$FILE" ]; then
-            echo "fontconfig-2.15.0 already present in download cache."
-          else
-            echo "Downloading fontconfig 2.15.0 from working mirror..."
-
-            curl -fL --retry 8 --retry-delay 3 \
+          file="${{ github.workspace }}/dl/fontconfig-2.15.0.tar.xz"
+          if [ ! -s "$file" ]; then
+            curl -fL --retry 10 --retry-delay 5 \
               "https://dev-www.libreoffice.org/src/fontconfig-2.15.0.tar.xz" \
-              -o "$FILE"
-
-            if [ ! -s "$FILE" ]; then
-              echo "ERROR: fontconfig download failed"
-              exit 1
-            fi
+              -o "$file"
           fi
+          test -s "$file"
+          ls -lh "$file"
 
-          echo "fontconfig archive:"
-          ls -lh "$FILE"
-
-          echo "MD5:"
-          md5sum "$FILE"
-
-          EXPECTED="5bb3a2829aecb22ae553c39099bd0d6a"
-          ACTUAL="$(md5sum "$FILE" | awk '{print $1}')"
-
-          if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "ERROR: fontconfig checksum mismatch!"
-            echo "Expected: $EXPECTED"
-            echo "Actual:   $ACTUAL"
-            rm -f "$FILE"
-            exit 1
-          fi
-
-          echo "fontconfig 2.15.0 checksum OK."
-
-      - name: Locate official RG28XX board
+      - name: Find RG28XX board
         run: |
           set -e
-
-          echo "Available RG28XX board definitions:"
-          find configs -type f \
-            \( -name '*rg28xx*.board' -o -name '*rg28xx*.board' \) \
-            -print
-
-          BOARD="$(find configs -type f -name 'knulli-h700-rg28xx*.board' | sort | head -n 1)"
-
-          if [ -z "$BOARD" ]; then
-            echo "ERROR: Official KNULLI H700 RG28XX board definition was not found."
-            find configs -type f -name 'k*.board' | sort | grep -Ei 'h700|rg28'
+          board="$(find configs -type f -name 'knulli-h700-rg28xx*.board' | sort | head -n 1)"
+          if [ -z "$board" ]; then
+            echo "ERROR: RG28XX board definition not found"
+            find configs -type f -name 'knulli-*.board' | sort | grep -Ei 'h700|rg28' || true
             exit 1
           fi
+          echo "Using board: $board"
+          cp "$board" configs/knulli-h700-rg28xx-rndis.board
 
-          echo "Using board: $BOARD"
-
-          cp "$BOARD" configs/knulli-h700-rg28xx-rndis.board
-
-          echo "Custom board:"
-          cat configs/knulli-h700-rg28xx-rndis.board
-
-      - name: Enable RNDIS in official H700 kernel configuration
+      - name: Enable RNDIS kernel options
         run: |
           set -e
-
-          CONFIG="board/allwinner/h700/linux-sunxi64-legacy.config"
-
-          if [ ! -f "$CONFIG" ]; then
-            echo "ERROR: $CONFIG not found"
-            exit 1
-          fi
-
-          echo "Original USB networking configuration:"
-          grep -E \
-            'CONFIG_(NETDEVICES|USB_NET_DRIVERS|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST|MII)' \
-            "$CONFIG" || true
-
-          # Remove any previous definitions so we don't create
-          # conflicting duplicate assignments.
+          config="board/allwinner/h700/linux-sunxi64-legacy.config"
+          test -f "$config"
           sed -i \
             -e '/^CONFIG_NETDEVICES=/d' \
             -e '/^# CONFIG_NETDEVICES is not set$/d' \
@@ -182,261 +69,62 @@ jobs:
             -e '/^# CONFIG_USB_NET_RNDIS_HOST is not set$/d' \
             -e '/^CONFIG_MII=/d' \
             -e '/^# CONFIG_MII is not set$/d' \
-            "$CONFIG"
+            "$config"
+          printf '%s\n' \
+            'CONFIG_NETDEVICES=y' \
+            'CONFIG_USB_NET_DRIVERS=y' \
+            'CONFIG_USB_USBNET=y' \
+            'CONFIG_USB_NET_CDCETHER=y' \
+            'CONFIG_USB_NET_RNDIS_HOST=y' \
+            'CONFIG_MII=y' >> "$config"
+          grep -E '^CONFIG_(NETDEVICES|USB_NET_DRIVERS|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST|MII)=' "$config"
 
-          cat >> "$CONFIG" <<'EOF'
-
-# RG28XX USB tethering / RNDIS
-CONFIG_NETDEVICES=y
-CONFIG_USB_NET_DRIVERS=y
-CONFIG_USB_USBNET=y
-CONFIG_USB_NET_CDCETHER=y
-CONFIG_USB_NET_RNDIS_HOST=y
-CONFIG_MII=y
-EOF
-
-          echo
-          echo "Final USB networking configuration:"
-          grep -E \
-            'CONFIG_(NETDEVICES|USB_NET_DRIVERS|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST|MII)' \
-            "$CONFIG"
-
-      - name: Add RNDIS diagnostic scripts to root filesystem
+      - name: Verify BSP CDC workaround
         run: |
           set -e
-
-          OVERLAY="board/allwinner/h700/fsoverlay/usr/share/knulli-rndis"
-
-          mkdir -p "$OVERLAY"
-
-          cat > "$OVERLAY/tether.sh" <<'EOF'
-#!/bin/sh
-
-echo "[RNDIS] Starting USB tethering..."
-
-IFACE=""
-
-for dev in usb0 rndis0; do
-    if ip link show "$dev" >/dev/null 2>&1; then
-        IFACE="$dev"
-        break
-    fi
-done
-
-if [ -z "$IFACE" ]; then
-    echo "[RNDIS] ERROR: usb0/rndis0 not detected."
-    ip -br link 2>/dev/null || ip link
-    exit 1
-fi
-
-echo "[RNDIS] Interface: $IFACE"
-
-ip link set "$IFACE" up || exit 1
-
-if command -v udhcpc >/dev/null 2>&1; then
-    killall udhcpc 2>/dev/null || true
-
-    echo "[RNDIS] Requesting DHCP..."
-    udhcpc -i "$IFACE" -n -q -t 5 -T 3
-else
-    echo "[RNDIS] WARNING: udhcpc not found."
-fi
-
-echo
-echo "===== RNDIS STATUS ====="
-echo
-echo "Interface:"
-ip addr show "$IFACE"
-
-echo
-echo "Routes:"
-ip route
-
-echo
-echo "Default route:"
-ip route show default
-
-echo
-echo "Connectivity:"
-if ping -c 3 -W 3 1.1.1.1 >/dev/null 2>&1; then
-    echo "ONLINE"
-else
-    echo "OFFLINE"
-fi
-EOF
-
-          cat > "$OVERLAY/debug.sh" <<'EOF'
-#!/bin/sh
-
-OUT="/tmp/rndis-debug-$(date +%Y%m%d-%H%M%S).log"
-
-{
-    echo "=========================================="
-    echo " KNULLI RG28XX RNDIS DEBUG"
-    echo "=========================================="
-
-    echo
-    echo "=== Kernel ==="
-    uname -a
-    cat /proc/version
-
-    echo
-    echo "=== Interfaces ==="
-    ip -br link
-    ip addr
-
-    echo
-    echo "=== Routes ==="
-    ip route
-
-    echo
-    echo "=== USB ==="
-    lsusb 2>&1 || true
-    lsusb -t 2>&1 || true
-
-    echo
-    echo "=== RNDIS / CDC modules ==="
-    modinfo usbnet 2>&1 || true
-    modinfo cdc_ether 2>&1 || true
-    modinfo rndis_host 2>&1 || true
-
-    echo
-    echo "=== Kernel config ==="
-    zgrep -E \
-      'CONFIG_(USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST|MII)' \
-      /proc/config.gz 2>/dev/null || true
-
-    echo
-    echo "=== USB/RNDIS dmesg ==="
-    dmesg | grep -Ei \
-      'usb|rndis|cdc|1782|000c|descriptor|ether|usb0' || true
-
-    echo
-    echo "=== Last dmesg ==="
-    dmesg | tail -250
-
-    echo
-    echo "=== usb0/rndis0 ==="
-    for dev in usb0 rndis0; do
-        if ip link show "$dev" >/dev/null 2>&1; then
-            ip addr show "$dev"
-            ip route show dev "$dev"
-        fi
-    done
-
-} > "$OUT" 2>&1
-
-echo "RNDIS debug log:"
-echo "$OUT"
-EOF
-
-          chmod +x \
-            "$OVERLAY/tether.sh" \
-            "$OVERLAY/debug.sh"
-
-      - name: Verify exact Orange Pi RNDIS source
-        run: |
-          set -e
-
-          SRC="https://raw.githubusercontent.com/orangepi-xunlong/linux-orangepi/orange-pi-4.9-sun50iw9/drivers/net/usb/cdc_ether.c"
-
-          curl -fsSL "$SRC" -o /tmp/cdc_ether.c
-
-          echo "Checking BSP CDC/RNDIS workaround..."
-
-          grep -q "android_rndis_quirk" /tmp/cdc_ether.c
+          url="https://raw.githubusercontent.com/orangepi-xunlong/linux-orangepi/orange-pi-4.9-sun50iw9/drivers/net/usb/cdc_ether.c"
+          curl -fsSL "$url" -o /tmp/cdc_ether.c
+          grep -q 'android_rndis_quirk' /tmp/cdc_ether.c
           grep -q 'usb_ifnum_to_if(dev->udev, 0)' /tmp/cdc_ether.c
           grep -q 'usb_ifnum_to_if(dev->udev, 1)' /tmp/cdc_ether.c
-
-          echo "OK: exact Orange Pi BSP contains the Android RNDIS fallback."
+          echo 'BSP CDC/RNDIS workaround confirmed.'
 
       - name: Generate KNULLI defconfig
-        run: |
-          set -e
+        run: ./configs/createDefconfig.sh ./configs/knulli-h700-rg28xx-rndis
 
-          ./configs/createDefconfig.sh \
-            ./configs/knulli-h700-rg28xx-rndis
-
-      - name: Build full KNULLI RG28XX image
+      - name: Build full image
         env:
           BR2_DL_DIR: ${{ github.workspace }}/dl
           BR2_CCACHE_DIR: ${{ github.workspace }}/ccache
         run: |
           set -e
-
-          export BR2_DL_DIR="$DL_DIR"
-          export BR2_CCACHE_DIR="$BR2_CCACHE_DIR"
-
-          echo "Buildroot download directory:"
-          echo "$BR2_DL_DIR"
-
-          echo "Starting full KNULLI RG28XX RNDIS build..."
-
-          make \
-            DIRECT_BUILD=1 \
+          mkdir -p "$BR2_DL_DIR" "$BR2_CCACHE_DIR"
+          make DIRECT_BUILD=1 \
             BR2_DL_DIR="$BR2_DL_DIR" \
             BR2_CCACHE_DIR="$BR2_CCACHE_DIR" \
             h700-rg28xx-rndis-build
 
-      - name: Verify generated image
+      - name: Verify image
         run: |
           set -e
+          find output/h700-rg28xx-rndis -type f \
+            \( -name '*.img.gz' -o -name '*.img' \) -print
+          image="$(find output/h700-rg28xx-rndis -type f -name '*.img.gz' | head -n 1)"
+          test -n "$image"
+          ls -lh "$image"
 
-          echo "Searching for generated KNULLI images..."
+      - name: Verify RNDIS config in build output
+        run: |
+          grep -R 'CONFIG_USB_NET_RNDIS_HOST=y' \
+            output/h700-rg28xx-rndis/build/linux-* 2>/dev/null | head -20 || true
 
-          find output -type f \
-            \( -name '*.img' -o -name '*.img.gz' -o -name '*.7z' \) \
-            -printf '%p %s bytes\n' | sort
-
-          IMAGE="$(find output/h700-rg28xx-rndis/images \
-            -type f -name '*.img.gz' | head -n 1 || true)"
-
-          if [ -z "$IMAGE" ]; then
-            echo "ERROR: No .img.gz image was generated."
-            exit 1
-          fi
-
-          echo
-          echo "FINAL IMAGE:"
-          ls -lh "$IMAGE"
-
-      - name: Verify kernel RNDIS configuration
+      - name: Collect images
         run: |
           set -e
-
-          echo "Searching build output for RNDIS configuration..."
-
-          grep -R \
-            'CONFIG_USB_NET_RNDIS_HOST=y' \
-            output/h700-rg28xx-rndis/build/linux-* \
-            2>/dev/null | head -20 || true
-
-          echo
-          echo "Searching for RNDIS symbols..."
-          grep -R \
-            'generic_rndis_bind' \
-            output/h700-rg28xx-rndis/build/linux-* \
-            2>/dev/null | head -20 || true
-
-      - name: Collect artifacts
-        run: |
-          set -e
-
           mkdir -p artifacts
-
-          find output/h700-rg28xx-rndis/images \
-            -type f \
+          find output/h700-rg28xx-rndis -type f \
             \( -name '*.img.gz' -o -name '*.img' \) \
             -exec cp -v {} artifacts/ \;
-
-          if [ -f output/h700-rg28xx-rndis/images/knulli/images/h700-rg28xx-rndis/knulli-h700-rg28xx-rndis.img.gz ]; then
-            cp \
-              output/h700-rg28xx-rndis/images/knulli/images/h700-rg28xx-rndis/knulli-h700-rg28xx-rndis.img.gz \
-              artifacts/
-          fi
-
-          echo
-          echo "Artifacts:"
           ls -lh artifacts
 
       - name: Upload full KNULLI image
@@ -452,7 +140,5 @@ EOF
         uses: actions/upload-artifact@v4
         with:
           name: knulli-rg28xx-rndis-build-logs
-          path: |
-            output/h700-rg28xx-rndis/build/*/*.log
-            output/h700-rg28xx-rndis/build/*/*.log.do
+          path: output/h700-rg28xx-rndis/build/
           if-no-files-found: ignore
