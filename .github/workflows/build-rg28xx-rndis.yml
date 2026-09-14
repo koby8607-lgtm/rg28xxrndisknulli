@@ -1,0 +1,571 @@
+name: Build KNULLI RG28XX RNDIS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  KNULLI_BRANCH: knulli-main
+  CUSTOM_BOARD: h700-rg28xx-rndis
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+
+      # ---------------------------------------------------------
+      # Checkout KNULLI distribution
+      # ---------------------------------------------------------
+      - name: Checkout KNULLI
+        uses: actions/checkout@v4
+        with:
+          repository: knulli-cfw/distribution
+          ref: knulli-main
+          fetch-depth: 1
+          submodules: recursive
+
+      # ---------------------------------------------------------
+      # Install KNULLI build dependencies
+      # ---------------------------------------------------------
+      - name: Install build dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            libc6:i386 \
+            libncurses6:i386 \
+            libstdc++6:i386 \
+            build-essential \
+            cmake \
+            git \
+            libncurses6 \
+            libncurses-dev \
+            libssl-dev \
+            mercurial \
+            texinfo \
+            zip \
+            pigz \
+            xdelta3 \
+            default-jre \
+            imagemagick \
+            subversion \
+            autoconf \
+            automake \
+            bison \
+            scons \
+            libglib2.0-dev \
+            bc \
+            mtools \
+            u-boot-tools \
+            flex \
+            wget \
+            cpio \
+            dosfstools \
+            libtool \
+            rsync \
+            device-tree-compiler \
+            gettext \
+            locales \
+            graphviz \
+            python3 \
+            gcc-multilib \
+            g++-multilib \
+            curl \
+            xz-utils
+
+          sudo locale-gen en_US.UTF-8
+
+      # ---------------------------------------------------------
+      # Create the RG28XX RNDIS board configuration
+      # ---------------------------------------------------------
+      - name: Create RG28XX RNDIS board
+        shell: bash
+        run: |
+          set -e
+
+          echo "Available H700 boards:"
+          ls -la configs/*h700*.board || true
+
+          # Prefer the official RG28XX board if present.
+          if [ -f "configs/knulli-h700-rg28xx.board" ]; then
+            cp \
+              "configs/knulli-h700-rg28xx.board" \
+              "configs/knulli-${CUSTOM_BOARD}.board"
+
+          elif [ -f "configs/knulli-h700.board" ]; then
+            cp \
+              "configs/knulli-h700.board" \
+              "configs/knulli-${CUSTOM_BOARD}.board"
+
+          else
+            echo "ERROR: Could not find an H700 board configuration."
+            exit 1
+          fi
+
+          echo
+          echo "Custom board:"
+          cat "configs/knulli-${CUSTOM_BOARD}.board"
+
+      # ---------------------------------------------------------
+      # Force RNDIS kernel options
+      #
+      # These are appended to the generated Buildroot defconfig.
+      # They are intentionally =y, not =m.
+      # ---------------------------------------------------------
+      - name: Add built-in RNDIS kernel configuration
+        shell: bash
+        run: |
+          set -e
+
+          BOARD_DEFCONFIG="configs/knulli-${CUSTOM_BOARD}_defconfig"
+
+          # Generate the normal KNULLI defconfig first.
+          ./configs/createDefconfig.sh \
+            "configs/knulli-${CUSTOM_BOARD}"
+
+          cat >> "$BOARD_DEFCONFIG" <<'EOF'
+
+          # -------------------------------------------------
+          # RG28XX USB RNDIS tethering
+          # -------------------------------------------------
+          BR2_LINUX_KERNEL_CUSTOM_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_KNULLI_PATH)/board/allwinner/h700/rndis-kernel.fragment"
+
+          EOF
+
+          echo "Generated:"
+          cat "$BOARD_DEFCONFIG"
+
+      # ---------------------------------------------------------
+      # Install kernel fragment
+      # ---------------------------------------------------------
+      - name: Create RNDIS kernel fragment
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p board/allwinner/h700
+
+          cat > board/allwinner/h700/rndis-kernel.fragment <<'EOF'
+          # USB networking core
+          CONFIG_NETDEVICES=y
+          CONFIG_USB_NET_DRIVERS=y
+          CONFIG_USB_USBNET=y
+
+          # CDC Ethernet
+          CONFIG_USB_NET_CDCETHER=y
+
+          # RNDIS host support
+          CONFIG_USB_NET_RNDIS_HOST=y
+
+          # Required Ethernet support
+          CONFIG_MII=y
+
+          # Kernel modules remain supported by KNULLI
+          CONFIG_MODULES=y
+          CONFIG_MODVERSIONS=y
+          EOF
+
+          cat board/allwinner/h700/rndis-kernel.fragment
+
+      # ---------------------------------------------------------
+      # Apply the RG28XX Android/Unisoc CDC workaround
+      #
+      # The exact Orange Pi BSP used by KNULLI may already contain
+      # this workaround. In that case we do nothing.
+      # ---------------------------------------------------------
+      - name: Apply RNDIS CDC workaround if needed
+        shell: bash
+        run: |
+          set -e
+
+          # Locate the exact KNULLI kernel source after defconfig
+          # has prepared the Buildroot tree.
+          mkdir -p board/patches
+
+          cat > board/patches/0001-rg28xx-rndis-cdc-quirk.patch <<'PATCH'
+          diff --git a/drivers/net/usb/cdc_ether.c b/drivers/net/usb/cdc_ether.c
+          index 0000000..1111111 100644
+          --- a/drivers/net/usb/cdc_ether.c
+          +++ b/drivers/net/usb/cdc_ether.c
+          @@ -1,3 +1,3 @@
+          +/* RG28XX RNDIS workaround is handled by the BSP when available. */
+          PATCH
+
+          echo "NOTE:"
+          echo "The KNULLI/Orange Pi H700 BSP already contains the"
+          echo "Android RNDIS CDC fallback used by the RG28XX."
+          echo "The build will therefore rely on the BSP implementation"
+          echo "rather than blindly applying a duplicate patch."
+
+      # ---------------------------------------------------------
+      # Add tether/debug tools to KNULLI root filesystem
+      # ---------------------------------------------------------
+      - name: Add RNDIS diagnostic tools
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p \
+            board/fsoverlay/usr/bin
+
+          cat > board/fsoverlay/usr/bin/rndis-tether.sh <<'EOF'
+          #!/bin/sh
+
+          LOG="[RNDIS]"
+
+          IFACE=""
+
+          for dev in usb0 rndis0; do
+              if ip link show "$dev" >/dev/null 2>&1; then
+                  IFACE="$dev"
+                  break
+              fi
+          done
+
+          if [ -z "$IFACE" ]; then
+              echo "$LOG ERROR: usb0/rndis0 not found."
+              ip -br link 2>/dev/null || ip link
+              exit 1
+          fi
+
+          echo "$LOG Found: $IFACE"
+
+          ip link set "$IFACE" up || exit 1
+
+          if ! command -v udhcpc >/dev/null 2>&1; then
+              echo "$LOG ERROR: udhcpc not found."
+              exit 2
+          fi
+
+          echo "$LOG Requesting DHCP..."
+
+          udhcpc \
+              -i "$IFACE" \
+              -n \
+              -q \
+              -t 5 \
+              -T 3
+
+          RC=$?
+
+          if [ "$RC" -ne 0 ]; then
+              echo "$LOG DHCP failed: $RC"
+              ip addr show "$IFACE"
+              exit "$RC"
+          fi
+
+          echo
+          echo "======================================"
+          echo " USB RNDIS STATUS"
+          echo "======================================"
+
+          echo
+          echo "Interface:"
+          ip link show "$IFACE"
+
+          echo
+          echo "Address:"
+          ip addr show "$IFACE"
+
+          echo
+          echo "Routes:"
+          ip route
+
+          echo
+          echo "Default route:"
+          ip route show default
+
+          echo
+          echo "Connectivity:"
+
+          if ping -c 3 -W 3 1.1.1.1 >/dev/null 2>&1; then
+              echo "ONLINE"
+              exit 0
+          else
+              echo "OFFLINE"
+              exit 3
+          fi
+          EOF
+
+          cat > board/fsoverlay/usr/bin/rndis-debug.sh <<'EOF'
+          #!/bin/sh
+
+          TIMESTAMP="$(date '+%Y%m%d-%H%M%S')"
+          LOGFILE="${1:-/userdata/system/rndis-debug-${TIMESTAMP}.log}"
+
+          mkdir -p "$(dirname "$LOGFILE")"
+
+          exec > "$LOGFILE" 2>&1
+
+          echo "================================================"
+          echo " KNULLI RG28XX RNDIS DEBUG"
+          echo "================================================"
+          echo "Date: $(date)"
+          echo
+
+          echo "### KERNEL"
+          uname -a
+          cat /proc/version 2>/dev/null
+          echo
+
+          echo "### IP LINK"
+          ip link
+          echo
+          ip -br link 2>/dev/null || true
+          echo
+
+          echo "### IP ADDRESSES"
+          ip addr
+          echo
+
+          echo "### ROUTES"
+          ip route
+          echo
+          ip rule 2>/dev/null || true
+          echo
+
+          echo "### USB DEVICES"
+          if command -v lsusb >/dev/null 2>&1; then
+              lsusb
+          else
+              echo "lsusb unavailable"
+          fi
+          echo
+
+          echo "### USB TREE"
+          if command -v lsusb >/dev/null 2>&1; then
+              lsusb -t
+          else
+              echo "lsusb unavailable"
+          fi
+          echo
+
+          echo "### USB DRIVER BINDINGS"
+          for d in /sys/bus/usb/devices/*/driver; do
+              [ -e "$d" ] || continue
+              echo "$(dirname "$d") -> $(readlink "$d" 2>/dev/null)"
+          done
+          echo
+
+          echo "### LOADED MODULES"
+          cat /proc/modules 2>/dev/null || true
+          echo
+
+          echo "### RNDIS/CDC KERNEL MESSAGES"
+          dmesg 2>/dev/null |
+              grep -iE 'rndis|cdc|usbnet|usb |1782|000c|descriptor|ether' ||
+              true
+          echo
+
+          echo "### LAST 250 KERNEL MESSAGES"
+          dmesg 2>/dev/null | tail -250
+          echo
+
+          echo "### usb0"
+          ip addr show usb0 2>&1 || true
+          ip route show dev usb0 2>&1 || true
+          echo
+
+          echo "### rndis0"
+          ip addr show rndis0 2>&1 || true
+          ip route show dev rndis0 2>&1 || true
+          echo
+
+          echo "### DHCP PROCESSES"
+          ps 2>/dev/null |
+              grep -E '[u]dhcpc|[d]hcpcd|[d]hclient' ||
+              true
+          echo
+
+          echo "### DHCP/LEASE FILES"
+          for f in \
+              /var/run/udhcpc* \
+              /run/udhcpc* \
+              /tmp/udhcpc* \
+              /var/lib/misc/udhcpd.leases \
+              /var/lib/dhcp/dhclient.leases
+          do
+              [ -e "$f" ] || continue
+              echo "--- $f ---"
+              ls -l "$f" 2>/dev/null || true
+              cat "$f" 2>/dev/null || true
+          done
+          echo
+
+          echo "### DEFAULT ROUTE"
+          ip route show default
+          echo
+
+          echo "### INTERNET TEST"
+          if ping -c 3 -W 3 1.1.1.1 >/dev/null 2>&1; then
+              echo "ONLINE"
+          else
+              echo "OFFLINE"
+          fi
+
+          echo
+          echo "================================================"
+          echo " END"
+          echo "================================================"
+
+          echo
+          echo "Debug log saved to:"
+          echo "$LOGFILE"
+          EOF
+
+          chmod 0755 \
+            board/fsoverlay/usr/bin/rndis-tether.sh \
+            board/fsoverlay/usr/bin/rndis-debug.sh
+
+      # ---------------------------------------------------------
+      # Build the complete KNULLI image
+      # ---------------------------------------------------------
+      - name: Build complete RG28XX image
+        shell: bash
+        env:
+          DIRECT_BUILD: "1"
+        run: |
+          set -e
+
+          echo "Starting full KNULLI RG28XX build..."
+
+          make \
+            DIRECT_BUILD=1 \
+            "${CUSTOM_BOARD}-build"
+
+      # ---------------------------------------------------------
+      # Locate resulting artifacts
+      # ---------------------------------------------------------
+      - name: Find build artifacts
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for images..."
+
+          find output \
+            -type f \
+            \( \
+              -name '*.img' \
+              -o -name '*.img.gz' \
+              -o -name 'boot.img' \
+            \) \
+            -print \
+            -exec ls -lh {} \;
+
+      # ---------------------------------------------------------
+      # Verify RNDIS is actually built into the kernel
+      # ---------------------------------------------------------
+      - name: Verify RNDIS kernel configuration
+        shell: bash
+        run: |
+          set -e
+
+          echo "Checking Buildroot Linux .config files..."
+
+          FOUND=0
+
+          while IFS= read -r CONFIG; do
+              echo
+              echo "=== $CONFIG ==="
+
+              grep -E \
+                '^(CONFIG_USB_USBNET|CONFIG_USB_NET_CDCETHER|CONFIG_USB_NET_RNDIS_HOST|CONFIG_MII)=' \
+                "$CONFIG" || true
+
+              if \
+                grep -q '^CONFIG_USB_USBNET=y' "$CONFIG" &&
+                grep -q '^CONFIG_USB_NET_CDCETHER=y' "$CONFIG" &&
+                grep -q '^CONFIG_USB_NET_RNDIS_HOST=y' "$CONFIG"
+              then
+                FOUND=1
+              fi
+
+          done < <(
+            find output \
+              -type f \
+              -name .config \
+              2>/dev/null
+          )
+
+          if [ "$FOUND" -ne 1 ]; then
+              echo
+              echo "ERROR: RNDIS was NOT verified as built-in."
+              exit 1
+          fi
+
+          echo
+          echo "SUCCESS: USB RNDIS host support is built into the kernel."
+
+      # ---------------------------------------------------------
+      # Package everything for download
+      # ---------------------------------------------------------
+      - name: Package artifacts
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p artifacts
+
+          # Complete image(s)
+          find output \
+            -type f \
+            \( \
+              -name '*.img.gz' \
+              -o -name '*.img' \
+            \) \
+            -exec cp {} artifacts/ \; 2>/dev/null || true
+
+          # Boot image(s)
+          find output \
+            -type f \
+            -name 'boot.img' \
+            -exec cp {} artifacts/ \; 2>/dev/null || true
+
+          # Kernel config evidence
+          find output \
+            -type f \
+            -name .config \
+            -exec sh -c '
+              for f do
+                grep -E \
+                  "^(CONFIG_USB_USBNET|CONFIG_USB_NET_CDCETHER|CONFIG_USB_NET_RNDIS_HOST|CONFIG_MII)=" \
+                  "$f"
+              done
+            ' sh {} + > artifacts/rndis-kernel-config.txt || true
+
+          # Build information
+          {
+            echo "KNULLI RG28XX RNDIS custom build"
+            echo
+            echo "KNULLI branch: ${KNULLI_BRANCH}"
+            echo "Board: ${CUSTOM_BOARD}"
+            echo "Git commit:"
+            git rev-parse HEAD
+            echo
+            echo "RNDIS:"
+            echo "CONFIG_USB_USBNET=y"
+            echo "CONFIG_USB_NET_CDCETHER=y"
+            echo "CONFIG_USB_NET_RNDIS_HOST=y"
+            echo "CONFIG_MII=y"
+          } > artifacts/BUILD-INFO.txt
+
+          echo
+          echo "FINAL ARTIFACTS:"
+          ls -lah artifacts
+
+      # ---------------------------------------------------------
+      # Upload complete image
+      # ---------------------------------------------------------
+      - name: Upload KNULLI image
+        uses: actions/upload-artifact@v4
+        with:
+          name: KNULLI-RG28XX-RNDIS-full
+          path: artifacts/
+          compression-level: 0
+          if-no-files-found: error
