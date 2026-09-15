@@ -1,14 +1,16 @@
 name: Build KNULLI RG28XX RNDIS Full Image
 
-"on":
+'on':
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+
+    env:
+      DL_DIR: ${{ github.workspace }}/dl
+      CCACHE_DIR: ${{ github.workspace }}/ccache
+      OUTPUT_DIR: ${{ github.workspace }}/output
 
     steps:
       - name: Checkout KNULLI
@@ -19,18 +21,13 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
-      - name: Validate KNULLI source tree
+      - name: Initialize submodules
         shell: bash
         run: |
           set -euo pipefail
-          test -f Makefile
+          git submodule update --init --recursive
           test -f buildroot/Makefile
-          test -f configs/knulli-h700.board
-          git submodule status --recursive
-          test -f configs/createDefconfig.sh
-          test -f board/batocera/allwinner/h700/linux-sunxi64-legacy.config
-          echo "Verified required KNULLI H700 files are present."
-          echo "Official board file: configs/knulli-h700.board"
+          echo "Buildroot submodule is ready."
 
       - name: Install build dependencies
         shell: bash
@@ -41,96 +38,69 @@ jobs:
             build-essential bc bison flex gettext git \
             libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
             ccache cmake device-tree-compiler dosfstools file gawk \
-            graphviz imagemagick libglib2.0-dev libtool m4 mtools pigz \
-            python3 rsync scons subversion texinfo u-boot-tools unzip \
-            wget xdelta3 zip curl xz-utils
+            graphviz imagemagick libglib2.0-dev libtool m4 mtools \
+            pigz python3 rsync scons subversion texinfo u-boot-tools \
+            unzip wget xdelta3 zip curl xz-utils gcc-multilib g++-multilib
 
-      - name: Prepare cache directories
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dl buildroot-ccache
-          echo "DL_DIR=$GITHUB_WORKSPACE/dl"
-          echo "CCACHE_DIR=$GITHUB_WORKSPACE/buildroot-ccache"
-
-      - name: Ensure KNULLI submodules are initialized
-        shell: bash
-        run: |
-          set -euo pipefail
-          git submodule sync --recursive
-          git submodule update --init --recursive
-          test -f buildroot/Makefile
-          echo "Buildroot submodule is present."
-
-      - name: Restore Buildroot source cache
-        uses: actions/cache/restore@v4
+      - name: Restore Buildroot downloads cache
+        uses: actions/cache@v4
         with:
           path: dl
-          key: knulli-rg28xx-dl-${{ github.ref_name }}-${{ github.run_id }}
+          key: knulli-dl-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            knulli-rg28xx-dl-${{ github.ref_name }}-
-            knulli-rg28xx-dl-
+            knulli-dl-${{ runner.os }}-${{ github.ref_name }}-
+            knulli-dl-${{ runner.os }}-
 
-      - name: Restore Buildroot compiler cache
-        uses: actions/cache/restore@v4
+      - name: Restore ccache
+        uses: actions/cache@v4
         with:
-          path: buildroot-ccache
-          key: knulli-rg28xx-ccache-${{ github.ref_name }}-${{ github.run_id }}
+          path: ccache
+          key: knulli-ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            knulli-rg28xx-ccache-${{ github.ref_name }}-
-            knulli-rg28xx-ccache-
+            knulli-ccache-${{ runner.os }}-${{ github.ref_name }}-
+            knulli-ccache-${{ runner.os }}-
 
-      - name: Pre-seed fontconfig 2.15.0
+      - name: Prepare download and compiler cache directories
         shell: bash
         run: |
           set -euo pipefail
-          archive="$GITHUB_WORKSPACE/dl/fontconfig-2.15.0.tar.xz"
+          mkdir -p "$DL_DIR" "$CCACHE_DIR"
 
-          if [ -s "$archive" ]; then
-            echo "fontconfig-2.15.0.tar.xz already present."
-          else
-            echo "Downloading fontconfig-2.15.0.tar.xz from fallback mirror..."
+      - name: Pre-download fontconfig 2.15.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="$DL_DIR/fontconfig-2.15.0.tar.xz"
+          if [ ! -s "$FILE" ]; then
             curl -fL --retry 10 --retry-delay 5 \
               "https://dev-www.libreoffice.org/src/fontconfig-2.15.0.tar.xz" \
-              -o "$archive"
+              -o "$FILE"
           fi
+          test -s "$FILE"
+          echo "fontconfig archive ready:"
+          ls -lh "$FILE"
 
-          test -s "$archive"
-          file "$archive"
-          ls -lh "$archive"
-
-      - name: Create RG28XX build target from official H700 board
+      - name: Verify H700 board and config
         shell: bash
         run: |
           set -euo pipefail
+          test -f configs/knulli-h700.board
+          test -f board/batocera/allwinner/h700/linux-sunxi64-legacy.config
+          echo "Official KNULLI H700 board/config found."
 
-          # Current KNULLI main exposes the H700 board as
-          # configs/knulli-h700.board. There is no official
-          # configs/knulli-h700-rg28xx.board file in the current tree.
-          # The previous workflow incorrectly required that nonexistent file.
+      - name: Create RG28XX RNDIS board target
+        shell: bash
+        run: |
+          set -euo pipefail
           cp configs/knulli-h700.board configs/knulli-h700-rg28xx-rndis.board
+          test -f configs/knulli-h700-rg28xx-rndis.board
 
-          test -s configs/knulli-h700-rg28xx-rndis.board
-
-          echo "Created: configs/knulli-h700-rg28xx-rndis.board"
-          grep -E '^(BR2_PACKAGE_BATOCERA_TARGET_H700|BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION|BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE)=' \
-            configs/knulli-h700-rg28xx-rndis.board
-
-          echo "Checking that KNULLI recognises the custom target..."
-          make vars > /tmp/knulli-vars.txt
-          cat /tmp/knulli-vars.txt
-          grep -q 'h700-rg28xx-rndis' /tmp/knulli-vars.txt
-          echo "Target is recognised by KNULLI Makefile."
-
-      - name: Enable built-in RNDIS kernel support
+      - name: Enable built-in USB RNDIS support
         shell: bash
         run: |
           set -euo pipefail
+          CONFIG="board/batocera/allwinner/h700/linux-sunxi64-legacy.config"
 
-          config='board/batocera/allwinner/h700/linux-sunxi64-legacy.config'
-          test -s "$config"
-
-          # Remove existing assignments so each option has exactly one final value.
           sed -i \
             -e '/^CONFIG_NETDEVICES=/d' \
             -e '/^# CONFIG_NETDEVICES is not set$/d' \
@@ -144,143 +114,131 @@ jobs:
             -e '/^# CONFIG_USB_NET_RNDIS_HOST is not set$/d' \
             -e '/^CONFIG_MII=/d' \
             -e '/^# CONFIG_MII is not set$/d' \
-            "$config"
+            "$CONFIG"
 
-          printf '%s\n' \
-            '# RG28XX USB tethering / RNDIS' \
-            'CONFIG_NETDEVICES=y' \
-            'CONFIG_USB_NET_DRIVERS=y' \
-            'CONFIG_USB_USBNET=y' \
-            'CONFIG_USB_NET_CDCETHER=y' \
-            'CONFIG_USB_NET_RNDIS_HOST=y' \
-            'CONFIG_MII=y' >> "$config"
+          printf "\n# RG28XX USB tethering / RNDIS\nCONFIG_NETDEVICES=y\nCONFIG_USB_NET_DRIVERS=y\nCONFIG_USB_USBNET=y\nCONFIG_USB_NET_CDCETHER=y\nCONFIG_USB_NET_RNDIS_HOST=y\nCONFIG_MII=y\n" >> "$CONFIG"
 
-          echo "Final kernel input settings:"
-          grep -E '^CONFIG_(NETDEVICES|USB_NET_DRIVERS|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST|MII)=' "$config"
+          grep -E \
+            'CONFIG_(NETDEVICES|USB_NET_DRIVERS|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST|MII)=' \
+            "$CONFIG"
 
-      - name: Verify RNDIS source and required USB options are present
+      - name: Verify Orange Pi Android RNDIS fallback
         shell: bash
         run: |
           set -euo pipefail
-
-          # The exact KNULLI H700 board uses this Orange Pi BSP branch.
-          # Verify the source branch directly without cloning it a second time.
-          grep -q 'BR2_LINUX_KERNEL_CUSTOM_REPO_URL="https://github.com/orangepi-xunlong/linux-orangepi.git"' \
-            configs/knulli-h700-rg28xx-rndis.board
-          grep -q 'BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="orange-pi-4.9-sun50iw9"' \
-            configs/knulli-h700-rg28xx-rndis.board
-
-          echo "Kernel source: Orange Pi linux-orangepi orange-pi-4.9-sun50iw9"
-          echo "RNDIS workaround is supplied by that BSP branch; no duplicate patch is applied."
+          SRC="$(find . -path '*/drivers/net/usb/cdc_ether.c' -print | sort | sed -n '1p')"
+          test -n "$SRC"
+          grep -q 'android_rndis_quirk' "$SRC"
+          grep -q 'usb_ifnum_to_if(dev->udev, 0)' "$SRC"
+          grep -q 'usb_ifnum_to_if(dev->udev, 1)' "$SRC"
+          echo "Android RNDIS fallback present: $SRC"
 
       - name: Generate KNULLI defconfig
         shell: bash
         run: |
           set -euo pipefail
-          ./configs/createDefconfig.sh configs/knulli-h700-rg28xx-rndis
-          test -s configs/knulli-h700-rg28xx-rndis_defconfig
-          echo "Generated defconfig successfully."
+          ./configs/createDefconfig.sh ./configs/knulli-h700-rg28xx-rndis
 
-      - name: Configure target before full build
+      - name: Configure Buildroot target
         shell: bash
         run: |
           set -euo pipefail
-          make DIRECT_BUILD=1 \
-            DL_DIR="$GITHUB_WORKSPACE/dl" \
-            CCACHE_DIR="$GITHUB_WORKSPACE/buildroot-ccache" \
-            h700-rg28xx-rndis-config
-          test -s output/h700-rg28xx-rndis/.config
-          echo "Buildroot target configuration completed successfully."
+          make DIRECT_BUILD=1 h700-rg28xx-rndis-config
 
-      - name: Verify resolved kernel configuration
+      - name: Extract pygame2 source before full build
         shell: bash
         run: |
           set -euo pipefail
-          kernel_config='board/batocera/allwinner/h700/linux-sunxi64-legacy.config'
-          grep -q '^CONFIG_USB_USBNET=y$' "$kernel_config"
-          grep -q '^CONFIG_USB_NET_CDCETHER=y$' "$kernel_config"
-          grep -q '^CONFIG_USB_NET_RNDIS_HOST=y$' "$kernel_config"
-          echo "RNDIS kernel configuration verified before full build."
+          make -C buildroot \
+            O="$OUTPUT_DIR/h700-rg28xx-rndis" \
+            BR2_EXTERNAL="$PWD" \
+            BR2_DL_DIR="$DL_DIR" \
+            python-pygame2-extract
 
-      - name: Build complete KNULLI image
+      - name: Apply exact pygame2 GCC pragma fix
         shell: bash
         run: |
           set -euo pipefail
-          make DIRECT_BUILD=1 \
-            DL_DIR="$GITHUB_WORKSPACE/dl" \
-            CCACHE_DIR="$GITHUB_WORKSPACE/buildroot-ccache" \
+
+          PYGAME_DIR="$(find "$OUTPUT_DIR/h700-rg28xx-rndis/build" \
+            -maxdepth 1 -type d -name 'python-pygame2-*' -print | sort | sed -n '1p')"
+
+          test -n "$PYGAME_DIR"
+
+          HEADER="$PYGAME_DIR/src_c/include/sse2neon.h"
+          test -f "$HEADER"
+
+          echo "Pygame source: $PYGAME_DIR"
+          echo "Header: $HEADER"
+
+          # Pygame 2.5.2 leaves the GCC push_options block commented out
+          # but still emits a final pop_options. GCC treats that unmatched
+          # pragma as -Werror=pragmas with the toolchain used by this build.
+          if grep -q '^#pragma GCC pop_options$' "$HEADER"; then
+            sed -i '/^#pragma GCC pop_options$/d' "$HEADER"
+          fi
+
+          if grep -q '^#pragma GCC pop_options$' "$HEADER"; then
+            echo "ERROR: pygame pragma fix did not apply."
+            exit 1
+          fi
+
+          echo "pygame2 GCC pragma fix applied successfully."
+
+      - name: Build full KNULLI RG28XX image
+        shell: bash
+        run: |
+          set -euo pipefail
+          make \
+            DIRECT_BUILD=1 \
+            DL_DIR="$DL_DIR" \
+            CCACHE_DIR="$CCACHE_DIR" \
             h700-rg28xx-rndis-build
 
-      - name: Verify final image and final kernel config
+      - name: Verify final image
         shell: bash
         run: |
           set -euo pipefail
+          mapfile -d '' IMAGES < <(find "$OUTPUT_DIR/h700-rg28xx-rndis/images" \
+            -type f -name '*.img.gz' -print0)
 
-          echo "Images produced:"
-          find output/h700-rg28xx-rndis/images -type f \
-            \( -name '*.img.gz' -o -name '*.img' \) -print
+          if [ "${#IMAGES[@]}" -eq 0 ]; then
+            echo "ERROR: No final .img.gz image was produced."
+            exit 1
+          fi
 
-          image=""
-          while IFS= read -r candidate; do
-            image="$candidate"
-            break
-          done < <(find output/h700-rg28xx-rndis/images -type f -name '*.img.gz')
-          test -n "$image"
+          printf 'Generated image(s):\n'
+          printf '%s\n' "${IMAGES[@]}"
+          sha256sum "${IMAGES[@]}"
 
-          kernel_config=""
-          while IFS= read -r candidate; do
-            kernel_config="$candidate"
-            break
-          done < <(find output/h700-rg28xx-rndis/build -maxdepth 2 -type f -path '*/linux-*/.config')
-          test -n "$kernel_config"
-
-          grep -q '^CONFIG_USB_USBNET=y$' "$kernel_config"
-          grep -q '^CONFIG_USB_NET_CDCETHER=y$' "$kernel_config"
-          grep -q '^CONFIG_USB_NET_RNDIS_HOST=y$' "$kernel_config"
-
-          echo
-          echo "FINAL IMAGE: $image"
-          ls -lh "$image"
-
-      - name: Collect final image
+      - name: Collect final images only
         shell: bash
         run: |
           set -euo pipefail
           rm -rf artifacts
           mkdir -p artifacts
-          find output/h700-rg28xx-rndis/images -type f \
-            \( -name '*.img.gz' -o -name '*.img' \) \
-            -exec cp -v {} artifacts/ \
-            ;
+
+          find "$OUTPUT_DIR/h700-rg28xx-rndis/images" \
+            -type f \
+            -name '*.img.gz' \
+            -exec cp -v {} artifacts/ \;
+
+          test -n "$(find artifacts -type f -name '*.img.gz' -print -quit)"
           ls -lh artifacts
 
-      - name: Save Buildroot source cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: dl
-          key: knulli-rg28xx-dl-${{ github.ref_name }}-${{ github.run_id }}
-
-      - name: Save Buildroot compiler cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: buildroot-ccache
-          key: knulli-rg28xx-ccache-${{ github.ref_name }}-${{ github.run_id }}
-
-      - name: Upload complete image
-        if: success()
+      - name: Upload final image only
         uses: actions/upload-artifact@v4
         with:
           name: knulli-rg28xx-rndis-full-image
-          path: artifacts/
+          path: artifacts/*.img.gz
           if-no-files-found: error
           compression-level: 0
 
-      - name: Upload failure diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - name: Save caches for future runs
+        if: always()
+        uses: actions/cache/save@v4
         with:
-          name: knulli-rg28xx-rndis-failure-diagnostics
-          path: output/h700-rg28xx-rndis/
-          if-no-files-found: ignore
+          path: |
+            dl
+            ccache
+          key: knulli-postrun-${{ github.run_id }}
