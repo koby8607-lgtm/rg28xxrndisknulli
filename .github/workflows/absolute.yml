@@ -46,19 +46,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: dl
-          key: knulli-dl-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          key: knulli-rg28xx-dl-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            knulli-dl-${{ runner.os }}-${{ github.ref_name }}-
-            knulli-dl-${{ runner.os }}-
+            knulli-rg28xx-dl-${{ github.ref_name }}-
 
       - name: Restore ccache
         uses: actions/cache@v4
         with:
           path: ccache
-          key: knulli-ccache-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          key: knulli-rg28xx-ccache-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            knulli-ccache-${{ runner.os }}-${{ github.ref_name }}-
-            knulli-ccache-${{ runner.os }}-
+            knulli-rg28xx-ccache-${{ github.ref_name }}-
 
       - name: Prepare download and compiler cache directories
         shell: bash
