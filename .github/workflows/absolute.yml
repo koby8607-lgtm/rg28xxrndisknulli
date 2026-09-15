@@ -43,20 +43,22 @@ jobs:
             unzip wget xdelta3 zip curl xz-utils gcc-multilib g++-multilib
 
       - name: Restore Buildroot downloads cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: dl
           key: knulli-rg28xx-dl-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
             knulli-rg28xx-dl-${{ github.ref_name }}-
+            knulli-rg28xx-dl-
 
       - name: Restore ccache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ccache
           key: knulli-rg28xx-ccache-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
             knulli-rg28xx-ccache-${{ github.ref_name }}-
+            knulli-rg28xx-ccache-
 
       - name: Prepare download and compiler cache directories
         shell: bash
@@ -232,11 +234,16 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-      - name: Save caches for future runs
+      - name: Save Buildroot downloads cache
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: |
-            dl
-            ccache
-          key: knulli-postrun-${{ github.run_id }}
+          path: dl
+          key: knulli-rg28xx-dl-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ccache
+          key: knulli-rg28xx-ccache-${{ github.ref_name }}-${{ github.run_id }}
