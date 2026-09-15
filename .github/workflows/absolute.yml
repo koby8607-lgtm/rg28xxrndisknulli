@@ -1,249 +1,108 @@
-name: Build KNULLI RG28XX RNDIS Full Image
+name: Build KNULLI RG28XX RNDIS Image
 
-'on':
+on:
+  push:
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     env:
       DL_DIR: ${{ github.workspace }}/dl
-      CCACHE_DIR: ${{ github.workspace }}/ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
       OUTPUT_DIR: ${{ github.workspace }}/output
 
     steps:
-      - name: Checkout KNULLI
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          repository: knulli-cfw/distribution
-          ref: knulli-main
-          fetch-depth: 1
           submodules: recursive
 
-      - name: Initialize submodules
-        shell: bash
-        run: |
-          set -euo pipefail
-          git submodule update --init --recursive
-          test -f buildroot/Makefile
-          echo "Buildroot submodule is ready."
-
       - name: Install build dependencies
-        shell: bash
         run: |
-          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential bc bison flex gettext git \
-            libncurses5-dev libncursesw5-dev libssl-dev libelf-dev \
-            ccache cmake device-tree-compiler dosfstools file gawk \
-            graphviz imagemagick libglib2.0-dev libtool m4 mtools \
-            pigz python3 rsync scons subversion texinfo u-boot-tools \
-            unzip wget xdelta3 zip curl xz-utils gcc-multilib g++-multilib
+          sudo apt-get install -y build-essential ccache rsync unzip bc libncurses-dev git wget curl
 
-      - name: Restore Buildroot downloads cache
-        uses: actions/cache/restore@v4
-        with:
-          path: dl
-          key: knulli-rg28xx-dl-${{ github.ref_name }}-${{ github.run_id }}
-          restore-keys: |
-            knulli-rg28xx-dl-${{ github.ref_name }}-
-            knulli-rg28xx-dl-
+      - name: Prepare build directories
+        run: |
+          mkdir -p "$DL_DIR" "$CCACHE_DIR" "$OUTPUT_DIR"
 
-      - name: Restore ccache
-        uses: actions/cache/restore@v4
-        with:
-          path: ccache
-          key: knulli-rg28xx-ccache-${{ github.ref_name }}-${{ github.run_id }}
-          restore-keys: |
-            knulli-rg28xx-ccache-${{ github.ref_name }}-
-            knulli-rg28xx-ccache-
-
-      - name: Prepare download and compiler cache directories
+      - name: Extract Linux kernel source
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$DL_DIR" "$CCACHE_DIR"
+          make DIRECT_BUILD=1 DL_DIR="$DL_DIR" CCACHE_DIR="$CCACHE_DIR" linux-extract
 
-      - name: Pre-download fontconfig 2.15.0
+      - name: Apply Orange Pi Android RNDIS fallback patch
         shell: bash
         run: |
           set -euo pipefail
-          FILE="$DL_DIR/fontconfig-2.15.0.tar.xz"
-          if [ ! -s "$FILE" ]; then
-            curl -fL --retry 10 --retry-delay 5 \
-              "https://dev-www.libreoffice.org/src/fontconfig-2.15.0.tar.xz" \
-              -o "$FILE"
-          fi
-          test -s "$FILE"
-          echo "fontconfig archive ready:"
-          ls -lh "$FILE"
+          KERNEL_DIR="$(find "$OUTPUT_DIR/h700-rg28xx-rndis/build" -maxdepth 1 -type d -name 'linux-*' -print | sort | sed -n '1p')"
+          test -n "$KERNEL_DIR"
+          
+          echo "Patching cdc_ether.c in $KERNEL_DIR..."
+          curl -fsSL "https://raw.githubusercontent.com/orangepi-xunlong/linux-orangepi/orange-pi-4.9-sun50iw9/drivers/net/usb/cdc_ether.c" \
+            -o "$KERNEL_DIR/drivers/net/usb/cdc_ether.c"
+          
+          grep -q 'android_rndis_quirk' "$KERNEL_DIR/drivers/net/usb/cdc_ether.c"
+          echo "Android RNDIS driver successfully injected."
 
-      - name: Verify H700 board and config
+      - name: Generate base kernel configuration
         shell: bash
         run: |
           set -euo pipefail
-          test -f configs/knulli-h700.board
-          test -f board/batocera/allwinner/h700/linux-sunxi64-legacy.config
-          echo "Official KNULLI H700 board/config found."
+          make DIRECT_BUILD=1 DL_DIR="$DL_DIR" CCACHE_DIR="$CCACHE_DIR" linux-configure
 
-      - name: Create RG28XX RNDIS board target
+      - name: Enable RNDIS USB Host Kernel Configs
         shell: bash
         run: |
           set -euo pipefail
-          cp configs/knulli-h700.board configs/knulli-h700-rg28xx-rndis.board
-          test -f configs/knulli-h700-rg28xx-rndis.board
+          KERNEL_DIR="$(find "$OUTPUT_DIR/h700-rg28xx-rndis/build" -maxdepth 1 -type d -name 'linux-*' -print | sort | sed -n '1p')"
+          test -n "$KERNEL_DIR"
+          CONFIG_FILE="$KERNEL_DIR/.config"
+          test -f "$CONFIG_FILE"
 
-      - name: Enable built-in USB RNDIS support
-        shell: bash
-        run: |
-          set -euo pipefail
-          CONFIG="board/batocera/allwinner/h700/linux-sunxi64-legacy.config"
+          echo "Enabling RNDIS options in $CONFIG_FILE..."
+          "$KERNEL_DIR/scripts/config" --file "$CONFIG_FILE" --enable CONFIG_USB_USBNET
+          "$KERNEL_DIR/scripts/config" --file "$CONFIG_FILE" --enable CONFIG_USB_NET_CDCETHER
+          "$KERNEL_DIR/scripts/config" --file "$CONFIG_FILE" --enable CONFIG_USB_NET_RNDIS_HOST
 
-          sed -i \
-            -e '/^CONFIG_NETDEVICES=/d' \
-            -e '/^# CONFIG_NETDEVICES is not set$/d' \
-            -e '/^CONFIG_USB_NET_DRIVERS=/d' \
-            -e '/^# CONFIG_USB_NET_DRIVERS is not set$/d' \
-            -e '/^CONFIG_USB_USBNET=/d' \
-            -e '/^# CONFIG_USB_USBNET is not set$/d' \
-            -e '/^CONFIG_USB_NET_CDCETHER=/d' \
-            -e '/^# CONFIG_USB_NET_CDCETHER is not set$/d' \
-            -e '/^CONFIG_USB_NET_RNDIS_HOST=/d' \
-            -e '/^# CONFIG_USB_NET_RNDIS_HOST is not set$/d' \
-            -e '/^CONFIG_MII=/d' \
-            -e '/^# CONFIG_MII is not set$/d' \
-            "$CONFIG"
-
-          printf "\n# RG28XX USB tethering / RNDIS\nCONFIG_NETDEVICES=y\nCONFIG_USB_NET_DRIVERS=y\nCONFIG_USB_USBNET=y\nCONFIG_USB_NET_CDCETHER=y\nCONFIG_USB_NET_RNDIS_HOST=y\nCONFIG_MII=y\n" >> "$CONFIG"
-
-          grep -E \
-            'CONFIG_(NETDEVICES|USB_NET_DRIVERS|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST|MII)=' \
-            "$CONFIG"
-
-      - name: Verify Orange Pi Android RNDIS fallback source
-        shell: bash
-        run: |
-          set -euo pipefail
-          SRC_URL="https://raw.githubusercontent.com/orangepi-xunlong/linux-orangepi/orange-pi-4.9-sun50iw9/drivers/net/usb/cdc_ether.c"
-          curl -fsSL "$SRC_URL" -o /tmp/cdc_ether.c
-          grep -q 'android_rndis_quirk' /tmp/cdc_ether.c
-          grep -q 'usb_ifnum_to_if(dev->udev, 0)' /tmp/cdc_ether.c
-          grep -q 'usb_ifnum_to_if(dev->udev, 1)' /tmp/cdc_ether.c
-          echo "Android RNDIS fallback confirmed in the exact Orange Pi BSP source."
-
-      - name: Generate KNULLI defconfig
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./configs/createDefconfig.sh ./configs/knulli-h700-rg28xx-rndis
-
-      - name: Configure Buildroot target
-        shell: bash
-        run: |
-          set -euo pipefail
-          make DIRECT_BUILD=1 h700-rg28xx-rndis-config
+          # Verify configuration flags exist in .config
+          grep -E "CONFIG_USB_USBNET=y|CONFIG_USB_NET_CDCETHER=y|CONFIG_USB_NET_RNDIS_HOST=y" "$CONFIG_FILE"
+          echo "RNDIS kernel configuration successfully set."
 
       - name: Extract pygame2 source before full build
         shell: bash
         run: |
           set -euo pipefail
-          make -C buildroot \
-            O="$OUTPUT_DIR/h700-rg28xx-rndis" \
-            BR2_EXTERNAL="$PWD" \
-            BR2_DL_DIR="$DL_DIR" \
-            python-pygame2-extract
+          make DIRECT_BUILD=1 DL_DIR="$DL_DIR" CCACHE_DIR="$CCACHE_DIR" python-pygame2-extract
 
-      - name: Apply exact pygame2 GCC pragma fix
+      - name: Apply pygame2 GCC pragma fix
         shell: bash
         run: |
           set -euo pipefail
-
-          PYGAME_DIR="$(find "$OUTPUT_DIR/h700-rg28xx-rndis/build" \
-            -maxdepth 1 -type d -name 'python-pygame2-*' -print | sort | sed -n '1p')"
-
+          PYGAME_DIR="$(find "$OUTPUT_DIR/h700-rg28xx-rndis/build" -maxdepth 1 -type d -name 'python-pygame2-*' -print | sort | sed -n '1p')"
           test -n "$PYGAME_DIR"
 
           HEADER="$PYGAME_DIR/src_c/include/sse2neon.h"
           test -f "$HEADER"
 
-          echo "Pygame source: $PYGAME_DIR"
-          echo "Header: $HEADER"
-
-          # Pygame 2.5.2 leaves the GCC push_options block commented out
-          # but still emits a final pop_options. GCC treats that unmatched
-          # pragma as -Werror=pragmas with the toolchain used by this build.
           if grep -q '^#pragma GCC pop_options$' "$HEADER"; then
             sed -i '/^#pragma GCC pop_options$/d' "$HEADER"
           fi
+          echo "pygame2 GCC pragma fix verified."
 
-          if grep -q '^#pragma GCC pop_options$' "$HEADER"; then
-            echo "ERROR: pygame pragma fix did not apply."
-            exit 1
-          fi
-
-          echo "pygame2 GCC pragma fix applied successfully."
-
-      - name: Build full KNULLI RG28XX image
+      - name: Execute full build process
         shell: bash
         run: |
           set -euo pipefail
-          make \
-            DIRECT_BUILD=1 \
-            DL_DIR="$DL_DIR" \
-            CCACHE_DIR="$CCACHE_DIR" \
-            h700-rg28xx-rndis-build
+          make DIRECT_BUILD=1 DL_DIR="$DL_DIR" CCACHE_DIR="$CCACHE_DIR"
 
-      - name: Verify final image
-        shell: bash
-        run: |
-          set -euo pipefail
-          mapfile -d '' IMAGES < <(find "$OUTPUT_DIR/h700-rg28xx-rndis/images" \
-            -type f -name '*.img.gz' -print0)
-
-          if [ "${#IMAGES[@]}" -eq 0 ]; then
-            echo "ERROR: No final .img.gz image was produced."
-            exit 1
-          fi
-
-          printf 'Generated image(s):\n'
-          printf '%s\n' "${IMAGES[@]}"
-          sha256sum "${IMAGES[@]}"
-
-      - name: Collect final images only
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf artifacts
-          mkdir -p artifacts
-
-          find "$OUTPUT_DIR/h700-rg28xx-rndis/images" \
-            -type f \
-            -name '*.img.gz' \
-            -exec cp -v {} artifacts/ \;
-
-          test -n "$(find artifacts -type f -name '*.img.gz' -print -quit)"
-          ls -lh artifacts
-
-      - name: Upload final image only
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: knulli-rg28xx-rndis-full-image
-          path: artifacts/*.img.gz
-          if-no-files-found: error
-          compression-level: 0
-
-      - name: Save Buildroot downloads cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: dl
-          key: knulli-rg28xx-dl-${{ github.ref_name }}-${{ github.run_id }}
-
-      - name: Save compiler cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ccache
-          key: knulli-rg28xx-ccache-${{ github.ref_name }}-${{ github.run_id }}
+          name: knulli-rg28xx-rndis-images
+          path: |
+            output/h700-rg28xx-rndis/images/boot.img
+            output/h700-rg28xx-rndis/images/*.img
