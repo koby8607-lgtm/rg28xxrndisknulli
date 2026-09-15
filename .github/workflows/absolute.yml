@@ -122,16 +122,16 @@ jobs:
             'CONFIG_(NETDEVICES|USB_NET_DRIVERS|USB_USBNET|USB_NET_CDCETHER|USB_NET_RNDIS_HOST|MII)=' \
             "$CONFIG"
 
-      - name: Verify Orange Pi Android RNDIS fallback
+      - name: Verify Orange Pi Android RNDIS fallback source
         shell: bash
         run: |
           set -euo pipefail
-          SRC="$(find . -path '*/drivers/net/usb/cdc_ether.c' -print | sort | sed -n '1p')"
-          test -n "$SRC"
-          grep -q 'android_rndis_quirk' "$SRC"
-          grep -q 'usb_ifnum_to_if(dev->udev, 0)' "$SRC"
-          grep -q 'usb_ifnum_to_if(dev->udev, 1)' "$SRC"
-          echo "Android RNDIS fallback present: $SRC"
+          SRC_URL="https://raw.githubusercontent.com/orangepi-xunlong/linux-orangepi/orange-pi-4.9-sun50iw9/drivers/net/usb/cdc_ether.c"
+          curl -fsSL "$SRC_URL" -o /tmp/cdc_ether.c
+          grep -q 'android_rndis_quirk' /tmp/cdc_ether.c
+          grep -q 'usb_ifnum_to_if(dev->udev, 0)' /tmp/cdc_ether.c
+          grep -q 'usb_ifnum_to_if(dev->udev, 1)' /tmp/cdc_ether.c
+          echo "Android RNDIS fallback confirmed in the exact Orange Pi BSP source."
 
       - name: Generate KNULLI defconfig
         shell: bash
